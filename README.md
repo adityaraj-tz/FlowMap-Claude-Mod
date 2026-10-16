@@ -3,6 +3,11 @@
 A Claude Code mod that shows what Claude is doing, live: which agents run on which model, which
 files it plans, reads and edits, how those files relate, and the one it is working on right now.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/files-dark.png">
+  <img alt="Flowmap's Files view: files grouped into Client, API, Service, Domain, Data, Database and Tests lanes, with arrows between them and the file being edited glowing with its model" src="docs/files-light.png">
+</picture>
+
 - **Sidebar** in Claude Code with two tabs: **Files** (an architecture map grouped into
   Client → API → Service → Domain → Data → Database, plus Tests and Docs) and **Agents** (the main
   loop and each subagent with its model, tool calls and durations).
@@ -10,6 +15,8 @@ files it plans, reads and edits, how those files relate, and the one it is worki
   layers wrapped to fit your screen, plus a timeline of the agents.
 - **Planned files**: Claude calls the mod's `plan_files` tool before multi-file changes, so the files
   it is about to create show as dashed `NEW` / `PLAN` cards before they exist.
+
+![Flowmap's Agents view: a timeline of the main loop and each subagent with its model, its tool calls and how long each took](docs/agents.png)
 
 Works in any terminal, Windows included: the sidebar is plain text and the diagram opens in your browser.
 
