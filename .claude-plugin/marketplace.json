@@ -1,0 +1,5 @@
+{
+  "name": "flowmap",
+  "owner": { "name": "adityaraj-tz" },
+  "plugins": [{ "name": "flowmap", "source": "./" }]
+}

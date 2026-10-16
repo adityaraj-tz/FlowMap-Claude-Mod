@@ -1,0 +1,7 @@
+{
+  "name": "flowmap",
+  "version": "1.0.0",
+  "author": { "name": "adityaraj-tz" },
+  "description": "Sidebar of live agents (with models) and an architecture map of the files Claude plans, edits and links",
+  "types": "./types/index.d.ts"
+}
