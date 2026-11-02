@@ -1,28 +1,32 @@
-// Flowmap: /flowmap opens a sidebar with two tabs.
+// Flowmap: /flowmap opens a sidebar with three tabs.
 //   Agents · the main loop, each subagent with its model, and their tool calls, live
 //   Files  · the files Claude plans, reads and edits, grouped into architecture layers
 //            (Client → API → Service → Domain → Data → Database), with the links between them,
 //            the file being worked on now and the model working on it
+//   Assumptions · what Claude took for granted along the way, and how sure it was
 // /flowmap web opens the same picture as a diagram in the browser, refreshed every 2 seconds.
-// Claude declares the files it will touch through the plan_files tool, so they show before they exist.
+// Claude declares the files it will touch through the plan_files tool, so they show before they exist,
+// and the assumptions it makes through note_assumptions, so the user can catch a wrong one early.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { FlowEdge, FlowFile, FlowNode } from '../types'
-import { agentLines, base, cap, CODE_FILE, edgesOf, isAbs, keyOf, LAYERS, layerOf, mergeEdges, norm, rel, shortModel, toolLabel } from './model'
+import type { FlowAssumption, FlowEdge, FlowFile, FlowNode } from '../types'
+import { agentLines, assumptionKey, base, cap, CODE_FILE, CONFIDENCE, edgesOf, isAbs, keyOf, LAYERS, layerOf, mergeAssumptions, mergeEdges, norm, rel, shortModel, toolLabel } from './model'
 import { page } from './web'
 
 const PANE = 'flowmap'
 const PLAN_TOOL = 'mcp__flowmap__plan_files'
+const ASSUME_TOOL = 'mcp__flowmap__note_assumptions'
 const MAX_FILES = 40
 // Claude Code's own bookkeeping, not work worth a row.
-const INTERNAL = new Set(['ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite', 'SubagentHandback', PLAN_TOOL])
+const INTERNAL = new Set(['ToolSearch', 'TaskCreate', 'TaskUpdate', 'TaskGet', 'TaskList', 'TodoWrite', 'SubagentHandback', PLAN_TOOL, ASSUME_TOOL])
 
 // Held by the host, so a hot reload keeps the picture.
 const nodes = atom({ plugin: 'flowmap', key: 'nodes' } as const, [] as FlowNode[])
 const files = atom({ plugin: 'flowmap', key: 'files' } as const, [] as FlowFile[])
 const edges = atom({ plugin: 'flowmap', key: 'edges' } as const, [] as FlowEdge[])
-const view = atom({ plugin: 'flowmap', key: 'view' } as const, 'files' as 'agents' | 'files')
+const assumptions = atom({ plugin: 'flowmap', key: 'assumptions' } as const, [] as FlowAssumption[])
+const view = atom({ plugin: 'flowmap', key: 'view' } as const, 'files' as 'agents' | 'files' | 'assumptions')
 const web = atom({ plugin: 'flowmap', key: 'web' } as const, null as string | null)
 const now = atom({ plugin: 'flowmap', key: 'now' } as const, 0)
 
@@ -33,10 +37,12 @@ let webPending = false
 
 const GUIDE = `When a task will create or change two or more files, first call ${PLAN_TOOL} with every file you expect to create or modify (absolute or project-relative paths) and the links between them (from uses/calls/depends on to). Call it again when the plan changes. It only draws a live map for the user; it changes nothing.`
 
+const ASSUME_GUIDE = `Whenever you assume something the user did not state and you did not verify (a convention, a requirement, a default, an environment detail, which of several readings of the request they meant), call ${ASSUME_TOOL} with it, how sure you are, and why. Note it when you make it, not at the end, and put several in one call. It only shows the user a list; it changes nothing and needs no reply.`
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const r = await next(e)
-    await $.command.register({ name: 'flowmap', description: 'Live sidebar of agents and the files Claude plans and edits; /flowmap web opens the diagram in the browser', argumentHint: '[files|agents|web|clear]' }).catch(() => {})
+    await $.command.register({ name: 'flowmap', description: 'Live sidebar of agents, the files Claude plans and edits, and the assumptions it makes; /flowmap web opens the diagram in the browser', argumentHint: '[files|agents|assumptions|web|clear]' }).catch(() => {})
     await $.tool
       .register({
         name: 'plan_files',
@@ -71,6 +77,32 @@ export const register: Register = on => {
         },
       })
       .catch(() => {})
+    await $.tool
+      .register({
+        name: 'note_assumptions',
+        isDeferred: false,
+        description: 'Shows the user, in an Assumptions list, what you are assuming without having been told or having checked. Call as you make them. Has no effect on the code.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            assumptions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  text: { type: 'string', description: 'The assumption, as one plain sentence' },
+                  confidence: { type: 'string', enum: [...CONFIDENCE], description: 'How sure you are that it holds' },
+                  why: { type: 'string', description: 'What it rests on, or what changes if it is wrong' },
+                  files: { type: 'array', items: { type: 'string' }, description: 'Paths it bears on, if any' },
+                },
+                required: ['text', 'confidence'],
+              },
+            },
+          },
+          required: ['assumptions'],
+        },
+      })
+      .catch(() => {})
     $.clock.every(1000, () => {
       void (async () => {
         if ((await read($, nodes)).some(n => n.status === 'running')) await update($, now, () => Date.now())
@@ -81,8 +113,11 @@ export const register: Register = on => {
 
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    if (!e.tools.includes(PLAN_TOOL)) return r
-    return { sections: [...r.sections, { id: 'flowmap:guide', text: GUIDE, scope: 'session' as const }] }
+    const add = [
+      ...(e.tools.includes(PLAN_TOOL) ? [{ id: 'flowmap:guide', text: GUIDE, scope: 'session' as const }] : []),
+      ...(e.tools.includes(ASSUME_TOOL) ? [{ id: 'flowmap:assume', text: ASSUME_GUIDE, scope: 'session' as const }] : []),
+    ]
+    return add.length ? { sections: [...r.sections, ...add] } : r
   })
 
   on('turn.start', async ($, e, next) => {
@@ -113,6 +148,11 @@ export const register: Register = on => {
     const n = await plan($, e as unknown as Record<string, unknown>).catch(() => ({ files: 0, links: 0 }))
     void $.ui.open({ id: PANE, title: 'Flowmap' }).catch(() => {})
     return { result: `Flowmap shows ${n.files} planned files and ${n.links} links to the user.` }
+  })
+
+  on('tool.call', { tool: ASSUME_TOOL }, async ($, e) => {
+    const n = await assume($, e as unknown as Record<string, unknown>, e.agentId).catch(() => 0)
+    return { result: `Flowmap shows ${n} assumptions to the user.` }
   })
 
   on('tool.call', async ($, e, next) => {
@@ -169,15 +209,16 @@ export const register: Register = on => {
     if (arg === 'clear') {
       await update($, files, () => [])
       await update($, edges, () => [])
+      await update($, assumptions, () => [])
       texts.clear()
       changed($)
       return { text: 'Flowmap cleared.' }
     }
     if (arg === 'web') return { text: await openWeb($) }
-    if (arg === 'agents' || arg === 'files') await update($, view, () => arg)
+    if (arg === 'agents' || arg === 'files' || arg === 'assumptions') await update($, view, () => arg)
     await $.ui.open({ id: PANE, title: 'Flowmap', focus: true })
     const fs = await read($, files)
-    return { text: `Flowmap: ${fs.length} files, ${(await read($, nodes)).filter(n => n.kind === 'agent').length} agents. f: files · a: agents · b: browser · q: close` }
+    return { text: `Flowmap: ${fs.length} files, ${(await read($, nodes)).filter(n => n.kind === 'agent').length} agents, ${(await read($, assumptions)).length} assumptions. f: files · a: agents · s: assumptions · b: browser · q: close` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -189,6 +230,7 @@ export const register: Register = on => {
       <Box flexDirection="row" gap={1}>
         <Button key="files" label="Files" hotkey="f" variant={v === 'files' ? 'primary' : undefined} onPress={() => update($, view, () => 'files')} />
         <Button key="agents" label="Agents" hotkey="a" variant={v === 'agents' ? 'primary' : undefined} onPress={() => update($, view, () => 'agents')} />
+        <Button key="assumptions" label="Assumptions" hotkey="s" variant={v === 'assumptions' ? 'primary' : undefined} onPress={() => update($, view, () => 'assumptions')} />
         <Button key="web" label="Browser" hotkey="b" onPress={() => void openWeb($).then(t => $.ui.toast(t))} />
         <Button key="close" label="Close" hotkey="q" role="dismiss" onPress={() => $.ui.close({ id: PANE })} />
       </Box>
@@ -210,6 +252,32 @@ export const register: Register = on => {
                 {l.text}
               </Text>
             </Text>
+          ))}
+        </Box>
+      )
+    }
+
+    if (v === 'assumptions') {
+      const list = await read($, assumptions)
+      const shaky = list.filter(a => a.confidence !== 'high').length
+      // Two lines each, newest last, so the latest stay in view.
+      const shown = list.slice(-Math.max(1, Math.floor((rows - 2) / 2)))
+      return (
+        <Box flexDirection="column">
+          {head}
+          <Text dimColor>{list.length ? `${list.length} assumptions · ${shaky} not high confidence · ? low  ~ medium  ✓ high` : 'None yet. Claude notes what it takes for granted as it works.'}</Text>
+          {list.length > shown.length && <Text dimColor>{`… ${list.length - shown.length} earlier in the browser view (b)`}</Text>}
+          {shown.map(a => (
+            <Box key={a.key} flexDirection="column">
+              <Text wrap="truncate-end">
+                <Text color={CONF_COLOR[a.confidence]} bold>{`${CONF_MARK[a.confidence]} `}</Text>
+                <Text bold={a.confidence === 'low'}>{a.text}</Text>
+                {a.count > 1 ? <Text dimColor>{`  ×${a.count}`}</Text> : null}
+              </Text>
+              <Text wrap="truncate-end" dimColor>
+                {`  ${[a.why, a.files?.map(base).join(', '), `${a.by}${a.model ? ` · ${shortModel(a.model)}` : ''}`].filter(Boolean).join(' · ')}`}
+              </Text>
+            </Box>
           ))}
         </Box>
       )
@@ -268,6 +336,9 @@ export const register: Register = on => {
     )
   })
 }
+
+const CONF_MARK = { low: '?', medium: '~', high: '✓' } as const
+const CONF_COLOR = { low: 'red', medium: 'yellow', high: 'green' } as const
 
 const icon = (f: FlowFile) => (f.active === 'editing' ? '✎' : f.active === 'reading' ? '◉' : f.status === 'created' ? '+' : f.status === 'edited' ? '✓' : f.status === 'planned' ? '○' : '·')
 const tag = (f: FlowFile) => (f.status === 'planned' ? `  ${f.action === 'create' ? 'new' : f.action ?? 'planned'}${f.note ? ` · ${f.note}` : ''}` : f.status === 'created' ? '  new' : '')
@@ -357,6 +428,36 @@ async function plan($: EngineInterface, input: Record<string, unknown>) {
   return { files: keys.size, links: planned.length }
 }
 
+// The note_assumptions tool: each noted assumption, tagged with who made it and under which prompt.
+async function assume($: EngineInterface, input: Record<string, unknown>, agentId?: string) {
+  const items = Array.isArray(input.assumptions) ? (input.assumptions as Record<string, unknown>[]) : []
+  const list = await read($, nodes)
+  const main = list.find(n => n.id === 'main')
+  const owner = (agentId && list.find(n => n.id === agentId)) || main
+  const r = await rootOf($)
+  const noted: FlowAssumption[] = []
+  for (const it of items) {
+    const text = typeof it.text === 'string' ? it.text.replace(/\s+/g, ' ').trim().slice(0, 240) : ''
+    if (!text) continue
+    const paths = Array.isArray(it.files) ? (it.files as unknown[]).filter((p): p is string => typeof p === 'string' && !!p) : []
+    noted.push({
+      key: assumptionKey(text),
+      text,
+      why: typeof it.why === 'string' && it.why.trim() ? it.why.trim().slice(0, 240) : undefined,
+      confidence: (CONFIDENCE as readonly unknown[]).includes(it.confidence) ? (it.confidence as FlowAssumption['confidence']) : 'medium',
+      files: paths.length ? paths.slice(0, 8).map(p => rel(p, r)) : undefined,
+      by: owner?.kind === 'agent' ? owner.label : 'main',
+      model: owner?.model,
+      turn: main?.label.replace(/^main · /, '') ?? '',
+      count: 1,
+      at: Date.now(),
+    })
+  }
+  await update($, assumptions, old => mergeAssumptions(old, noted))
+  changed($)
+  return noted.length
+}
+
 // Something on the map changed: refresh the browser page soon, if it was opened.
 function changed($: EngineInterface) {
   if (webPending) return
@@ -371,7 +472,7 @@ async function writeWeb($: EngineInterface) {
   const path = await read($, web)
   if (!path) return
   const project = base(await rootOf($)) || 'project'
-  await $.fs.write(path, page({ files: await read($, files), edges: await read($, edges), nodes: await read($, nodes), project }))
+  await $.fs.write(path, page({ files: await read($, files), edges: await read($, edges), nodes: await read($, nodes), assumptions: await read($, assumptions), project }))
 }
 
 async function openWeb($: EngineInterface) {

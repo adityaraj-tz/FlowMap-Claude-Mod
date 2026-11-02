@@ -1,5 +1,5 @@
 // Pure logic: which architecture layer a file sits in, how files relate, the agent tree.
-import type { FlowEdge, FlowFile, FlowNode } from '../types'
+import type { FlowAssumption, FlowEdge, FlowFile, FlowNode } from '../types'
 
 // Left to right as a request flows, like the classic Client → Controller → Service → Model → DB picture.
 // `term` is the terminal color, `web` the page's.
@@ -132,6 +132,33 @@ export function agentLines(nodes: FlowNode[], at = Date.now()): Line[] {
     })
   }
   walk(null, '')
+  return out
+}
+
+export const assumptionKey = (text: string) => text.replace(/\s+/g, ' ').trim().toLowerCase()
+
+export const CONFIDENCE = ['low', 'medium', 'high'] as const
+
+// Adds newly noted assumptions to the list. The same text noted again (by any agent) is one
+// assumption: it keeps its first place and timestamp, counts the repeat, takes the newer reasoning
+// and confidence, and gathers both sets of files. Past `max`, the oldest high-confidence ones go
+// first: the shaky ones are what the user most needs to see.
+export function mergeAssumptions(old: FlowAssumption[], noted: FlowAssumption[], max = 100): FlowAssumption[] {
+  const out = [...old]
+  for (const a of noted) {
+    const i = out.findIndex(x => x.key === a.key)
+    if (i < 0) {
+      out.push(a)
+      continue
+    }
+    const prev = out[i]!
+    const files = [...new Set([...(prev.files ?? []), ...(a.files ?? [])])]
+    out[i] = { ...prev, why: a.why ?? prev.why, confidence: a.confidence, files: files.length ? files : undefined, by: a.by, model: a.model ?? prev.model, count: prev.count + 1 }
+  }
+  while (out.length > max) {
+    const drop = out.findIndex(x => x.confidence === 'high')
+    out.splice(drop < 0 ? 0 : drop, 1)
+  }
   return out
 }
 

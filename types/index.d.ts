@@ -27,13 +27,28 @@ export type FlowFile = {
 
 export type FlowEdge = { from: string; to: string; label?: string; planned?: boolean }
 
+// One assumption Claude made while working, declared through the note_assumptions tool.
+export type FlowAssumption = {
+  key: string // lower-cased, whitespace-collapsed text: the identity
+  text: string // what was assumed
+  why?: string // what it rests on, or what would change if it's wrong
+  confidence: 'low' | 'medium' | 'high'
+  files?: string[] // paths it bears on, as shown on the map
+  by: string // 'main' or an agent's label
+  model?: string
+  turn: string // the prompt it was made under, shortened
+  count: number // how many times it was noted
+  at: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     flowmap: {
       nodes: FlowNode[]
       files: FlowFile[]
       edges: FlowEdge[]
-      view: 'agents' | 'files'
+      assumptions: FlowAssumption[]
+      view: 'agents' | 'files' | 'assumptions'
       web: string | null // the companion page's path once opened
       now: number
     }

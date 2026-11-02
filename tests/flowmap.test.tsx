@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 
-import { edgesOf, layerOf, shortModel } from '../hooks/model'
+import { edgesOf, layerOf, mergeAssumptions, shortModel } from '../hooks/model'
 
 const PANE = { component: 'Pane', requestId: 'flowmap', props: { title: 'Flowmap', isFocused: true, bodyColumns: 70, placement: 'dock', scroll: { offset: 0, bodyRows: 60 } } }
 
@@ -51,6 +51,16 @@ describe('flowmap', () => {
     expect(edgesOf(files, texts)).toEqual([{ from: 'a', to: 'b' }])
   })
 
+  test('an assumption noted twice is one, counted; the cap drops sure ones first', () => {
+    const a = (text: string, confidence: 'low' | 'medium' | 'high', files?: string[]) => ({ key: text.toLowerCase(), text, confidence, files, by: 'main', turn: 't', count: 1, at: 0 })
+    const once = mergeAssumptions([], [a('Uses EF Core', 'medium', ['A.cs'])])
+    const twice = mergeAssumptions(once, [a('uses EF Core', 'high', ['B.cs'])])
+    expect(twice).toHaveLength(1)
+    expect(twice[0]).toMatchObject({ text: 'Uses EF Core', confidence: 'high', count: 2, files: ['A.cs', 'B.cs'] })
+    const capped = mergeAssumptions([a('one', 'low'), a('two', 'high')], [a('three', 'medium')], 2)
+    expect(capped.map(x => x.text)).toEqual(['one', 'three'])
+  })
+
   test('a plan, an edit and an agent show in the sidebar and the browser page', async ($, on) => {
     const { writes } = engine(on)
     await $.session.start({ surface: 'terminal', isInteractive: true, cwd: 'D:\\repo' } as any)
@@ -78,11 +88,29 @@ describe('flowmap', () => {
     expect(await pane.find({ type: 'Text', text: /● write controller .* haiku 5\.5/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /◆ main · add the orders API .* opus 5\.5/ })).toBeDefined()
 
+    await $.tool.call({
+      tool: 'mcp__flowmap__note_assumptions',
+      tool_use_id: 'n1',
+      agentId: 'ag1',
+      assumptions: [
+        { text: 'Orders are paged 20 at a time', confidence: 'low', why: 'No page size in the spec', files: ['D:\\repo\\src\\Api\\Controllers\\OrderController.cs'] },
+        { text: 'The API uses the existing auth policy', confidence: 'high' },
+      ],
+    } as any)
+    await $.command.run({ command: 'flowmap', args: 'assumptions' } as any)
+    expect(await pane.find({ type: 'Text', text: /2 assumptions · 1 not high confidence/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /Orders are paged 20 at a time/ })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: /No page size in the spec · OrderController\.cs · write controller · haiku 5\.5/ })).toBeDefined()
+
     await $.command.run({ command: 'flowmap', args: 'web' } as any)
     const html = Object.values(writes).at(-1) ?? ''
     expect(html).toContain('OrderController.cs')
     expect(html).toContain('API / Controller')
     expect(html).toContain('id="zf"') // the Fit control of the pan/zoom canvas
+    expect(html).toContain('href="#assumptions"')
+    expect(html).toContain('<div class="as low">')
+    expect(html).toContain('Orders are paged 20 at a time')
+    expect(html).toContain('add the orders API') // grouped under the prompt
     expect(html).not.toContain('${') // no template left unfilled in the page's script
     await pane.unmount()
   })
