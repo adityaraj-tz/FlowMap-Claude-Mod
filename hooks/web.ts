@@ -1,8 +1,9 @@
-// The companion page: the same data as the pane, drawn as an architecture diagram and a trace.
+// The companion page: the same data as the pane, drawn as an architecture diagram, a trace and a
+// list of assumptions.
 // Inspirations: the layered Client → Controller → Service → Model → DB diagram (colored lanes,
 // arrows), Figma's dotted canvas, GitHub Actions' status dots, Datadog/Vercel trace waterfalls,
 // VS Code's tab strip and Linear's quiet type.
-import type { FlowEdge, FlowFile, FlowNode } from '../types'
+import type { FlowAssumption, FlowEdge, FlowFile, FlowNode } from '../types'
 import { base, LAYERS, shortModel, took } from './model'
 
 const esc = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`)
@@ -96,8 +97,26 @@ ${f.active ? `<text x="0" y="${NODE_H + 12}" class="who">${esc(f.by ?? 'main')} 
   return { width, height, svg: `${laneSvg}\n${edgeSvg}\n${nodeSvg}` }
 }
 
-export function page(data: { files: FlowFile[]; edges: FlowEdge[]; nodes: FlowNode[]; project: string }, at = Date.now()) {
+const CONF = { low: { mark: '?', name: 'Low' }, medium: { mark: '~', name: 'Medium' }, high: { mark: '✓', name: 'High' } } as const
+
+// Newest first, the low-confidence ones flagged; grouped under the prompt they were made in.
+function assumptionList(list: FlowAssumption[]) {
+  const out: string[] = []
+  let turn: string | undefined
+  for (const a of [...list].reverse()) {
+    if (a.turn !== turn) {
+      turn = a.turn
+      out.push(`<h3>${esc(turn || 'Earlier')}</h3>`)
+    }
+    const meta = [a.by, shortModel(a.model), new Date(a.at).toLocaleTimeString(), a.count > 1 ? `noted ×${a.count}` : ''].filter(Boolean).map(esc).join(' · ')
+    out.push(`<div class="as ${a.confidence}"><span class="cf" title="${CONF[a.confidence].name} confidence">${CONF[a.confidence].mark}</span><div><div class="at">${esc(a.text)}</div>${a.why ? `<div class="aw">${esc(a.why)}</div>` : ''}<div class="am">${a.files?.length ? a.files.map(f => `<code title="${esc(f)}">${esc(base(f))}</code>`).join('') : ''}<span>${meta}</span></div></div></div>`)
+  }
+  return out.join('\n')
+}
+
+export function page(data: { files: FlowFile[]; edges: FlowEdge[]; nodes: FlowNode[]; assumptions?: FlowAssumption[]; project: string }, at = Date.now()) {
   const { files, edges, nodes, project } = data
+  const assumptions = data.assumptions ?? []
   const n = LAYERS.filter(l => files.some(f => f.layer === l.id)).length
   const variants = [...new Set([n, Math.ceil(n / 2), Math.ceil(n / 3)])].filter(c => c >= 1).map(c => layout(files, edges, c))
 
@@ -119,6 +138,8 @@ export function page(data: { files: FlowFile[]; edges: FlowEdge[]; nodes: FlowNo
     changed: files.filter(f => f.status === 'edited' || f.status === 'created').length,
     agents: nodes.filter(n => n.kind === 'agent').length,
     running: nodes.filter(n => n.kind === 'agent' && n.status === 'running').length,
+    assumed: assumptions.length,
+    shaky: assumptions.filter(a => a.confidence === 'low').length,
   }
 
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -168,11 +189,19 @@ section{display:none;flex:1;min-height:0;flex-direction:column}section.on{displa
 .bar{position:relative;height:8px;background:var(--bg);border-radius:4px}.bar i{position:absolute;top:0;bottom:0;border-radius:4px;background:var(--ok)}
 .bar i.running{background:var(--run)}.bar i.failed{background:var(--bad)}
 .dot{width:9px;height:9px;border-radius:50%;background:var(--ok)}.dot.running{background:var(--run);animation:p 1.4s infinite;box-shadow:0 0 0 0 var(--run)}.dot.failed{background:var(--bad)}
+nav a .n{display:inline-block;margin-left:6px;padding:0 6px;border-radius:99px;font-size:11px;background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.asl{margin:10px 16px 16px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:6px 16px 12px;overflow:auto;flex:1}
+.asl h3{font-size:12px;font-weight:600;color:var(--mute);margin:14px 0 6px;text-transform:uppercase;letter-spacing:.4px}
+.as{display:grid;grid-template-columns:26px 1fr;gap:10px;padding:9px 0;border-top:1px solid var(--line)}.asl h3+.as{border-top:0}
+.cf{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:12px;color:var(--c);background:color-mix(in srgb,var(--c) 16%,transparent)}
+.as.low{--c:var(--bad)}.as.medium{--c:var(--run)}.as.high{--c:var(--ok)}.as.low .at{font-weight:600}
+.aw{color:var(--mute);margin-top:2px}.am{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:4px;font-size:12px;color:var(--mute)}
+.am code{font:11.5px ui-monospace,Consolas,monospace;background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 6px;color:var(--ink)}
 @media (max-width:640px){.tr{grid-template-columns:14px 1fr 50px}.tr .chip,.tr .bar{display:none}.stats{margin-left:0}}
 </style></head><body>
 <header><h1>Flowmap<small>${esc(project)}</small></h1>
-<nav><a href="#files" id="tf">Files</a><a href="#agents" id="ta">Agents</a></nav>
-<div class="stats"><span><b>${counts.changed}</b> changed</span><span><b>${counts.planned}</b> planned</span><span><b>${counts.running}</b>/${counts.agents} agents running</span></div></header>
+<nav><a href="#files" id="tf">Files</a><a href="#agents" id="ta">Agents</a><a href="#assumptions" id="ts">Assumptions${counts.shaky ? `<span class="n" title="low confidence">${counts.shaky}</span>` : ''}</a></nav>
+<div class="stats"><span><b>${counts.changed}</b> changed</span><span><b>${counts.planned}</b> planned</span><span><b>${counts.running}</b>/${counts.agents} agents running</span><span><b>${counts.assumed}</b> assumptions</span></div></header>
 ${now ? `<div class="now"><span class="pulse"></span><span class="muted">${now.active === 'editing' ? 'Editing' : 'Reading'}</span><b>${esc(now.path)}</b><span class="chip">${esc(shortModel(now.model) || 'model ?')}</span><span class="muted">by ${esc(now.by ?? 'main')}</span></div>` : `<div class="now"><span class="muted">Idle · last update ${new Date(at).toLocaleTimeString()}</span></div>`}
 <section id="files">
 ${files.length ? `<div class="canvas" id="cv"><svg id="map">
@@ -189,9 +218,13 @@ ${variants.map((v, i) => `<g class="lay" data-w="${v.width}" data-h="${v.height}
 <section id="agents">
 ${nodes.length ? `<div class="trace">${trace}</div>` : '<div class="empty">No agents yet.</div>'}
 </section>
+<section id="assumptions">
+${assumptions.length ? `<div class="asl">${assumptionList(assumptions)}</div>` : '<div class="empty">No assumptions yet. Claude notes what it takes for granted as it works.</div>'}
+</section>
 <script>
 var store={get:function(k){try{return sessionStorage.getItem(k)}catch(e){return null}},set:function(k,v){try{sessionStorage.setItem(k,v)}catch(e){}}};
-function tab(){var a=location.hash==='#agents';document.getElementById('tf').className=a?'':'on';document.getElementById('ta').className=a?'on':'';document.getElementById('files').classList.toggle('on',!a);document.getElementById('agents').classList.toggle('on',a);if(!a&&window.fitIfAuto)fitIfAuto()}
+var TABS={files:'tf',agents:'ta',assumptions:'ts'};
+function tab(){var t=location.hash.slice(1);if(!TABS[t])t='files';for(var k in TABS){document.getElementById(TABS[k]).className=k===t?'on':'';document.getElementById(k).classList.toggle('on',k===t)}if(t==='files'&&window.fitIfAuto)fitIfAuto()}
 addEventListener('hashchange',tab);
 var cv=document.getElementById('cv'),busy=false;
 if(cv){
